@@ -9,23 +9,8 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
-	aa "github.com/marlonmp/bemo.go"
+	"github.com/marlonmp/bemogo"
 )
-
-func messageCreate(session *discordgo.Session, msg *discordgo.MessageCreate) {
-	if msg.Author.ID == session.State.User.ID {
-		return
-	}
-
-	if msg.Content == "ping" {
-		_, err := session.ChannelMessageSendReply(msg.ChannelID, "Pong!", msg.Reference())
-
-		if err != nil {
-			fmt.Println(err)
-			return
-		}
-	}
-}
 
 func init() {
 	err := godotenv.Load()
@@ -40,31 +25,30 @@ func main() {
 	session, err := discordgo.New(token)
 
 	if err != nil {
-		fmt.Printf("[err]:cannot connect to discord: %s\n", err)
+		fmt.Printf("cannot connect to discord: %s\n", err)
 	}
 
-	session.AddHandler(messageCreate)
-
-	a := aa.ChannelService{}
-
-	session.AddHandler(a.Join)
-	session.AddHandler(a.Follow)
-
 	session.Identify.Intents = discordgo.IntentsAll
+
+	service := bemogo.ChannelService{}
+
+	session.AddHandler(service.AddCommands)
 
 	err = session.Open()
 
 	if err != nil {
-		fmt.Printf("[err]: cannot open the websocket channel: %s\n", err)
+		fmt.Printf("cannot open the websocket channel: %s\n", err)
 	}
 
 	defer session.Close()
 
-	fmt.Println("Bemo.go is running. Press ctrl-c to exit.")
+	fmt.Println("bemogo is running. Press ctrl-c to exit.")
 
-	signal_chan := make(chan os.Signal, 1)
+	signalChan := make(chan os.Signal, 1)
 
-	signal.Notify(signal_chan, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 
-	<-signal_chan
+	<-signalChan
+
+	service.RemoveCommands(session)
 }
