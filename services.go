@@ -13,6 +13,8 @@ type interactionHandler func(session *dgo.Session, interaction *dgo.InteractionC
 
 type ChannelService struct {
 	linkedUser map[string]string
+
+	playlist map[string]playlist
 }
 
 func NewChannelService(owner int) ChannelService {
@@ -44,6 +46,54 @@ func (cs *ChannelService) Join(session *dgo.Session, interaction *dgo.Interactio
 	}
 
 	content := fmt.Sprintf("I'm joining in <#%s> :3", voiceConn.ChannelID)
+
+	interactionResponse(session, interaction, content)
+}
+
+func (cs *ChannelService) AddSong(session *dgo.Session, interaction *dgo.InteractionCreate) {
+	data := interaction.ApplicationCommandData()
+
+	videoID := data.Options[0]
+
+	client := youtube.Client{}
+
+	video, err := client.GetVideo(videoID.StringValue())
+
+	if err != nil {
+		fmt.Println("cannot get video info: ", err)
+		return
+	}
+
+	session.InteractionRespond(interaction.Interaction, &dgo.InteractionResponse{
+		Data: &dgo.InteractionResponseData{
+			Content: "New song added",
+			Embeds: []*dgo.MessageEmbed{
+				{
+					Title:       video.Title,
+					Description: video.Description,
+					Thumbnail:   &dgo.MessageEmbedThumbnail{URL: "url"},
+					Color:       100,
+				},
+			},
+		},
+	})
+
+	formats := video.Formats.WithAudioChannels()
+
+	url, err := client.GetStreamURL(video, &formats[0])
+
+	// stream, _, err := client.GetStream(video, &formats[0])
+
+	if err != nil {
+		fmt.Println("cannot get stream: ", err)
+		return
+	}
+
+	// defer stream.Close()
+
+	dgvoice.PlayAudioFile(voiceConn, url, make(<-chan bool))
+
+	content := fmt.Sprintf("Joining in <#%s>", voiceConn.ChannelID)
 
 	interactionResponse(session, interaction, content)
 }
@@ -92,11 +142,18 @@ func (cs ChannelService) Leave(session *dgo.Session, interaction *dgo.Interactio
 	voiceConn, ok := session.VoiceConnections[interaction.GuildID]
 
 	if !ok {
-		interactionResponse(session, interaction, "I'm not currently in a voice channel :P")
+		interactionResponse(session, interaction, "Sorry, I'm not currently in a voice channel :P")
 		return
 	}
 
-	voiceConn.Disconnect()
+	err := voiceConn.Disconnect()
+
+	if err != nil {
+		fmt.Println("cannot disconnect from the voice connection: ", err)
+		content := "It looks like there is an error trying to disconnection from the voice channel... that means I'm here forever >:D"
+		interactionResponse(session, interaction, content)
+		return
+	}
 
 	interactionResponse(session, interaction, "Ok, I'm leaving >:c")
 }
