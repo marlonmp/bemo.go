@@ -6,19 +6,41 @@ import (
 
 	"github.com/bwmarrin/dgvoice"
 	dgo "github.com/bwmarrin/discordgo"
-	"github.com/kkdai/youtube/v2"
 )
 
 type interactionHandler func(session *dgo.Session, interaction *dgo.InteractionCreate)
 
 type ChannelService struct {
-	linkedUser map[string]string
-
-	playlist map[string]playlist
+	playlists map[string]*playlist
 }
 
-func NewChannelService(owner int) ChannelService {
-	return ChannelService{}
+func NewChannelService() ChannelService {
+	playlists := make(map[string]*playlist)
+	return ChannelService{playlists: playlists}
+}
+
+func (cs *ChannelService) List(session *dgo.Session, interaction *dgo.InteractionCreate) {
+	playlist, ok := cs.playlists[interaction.GuildID]
+
+	if !ok {
+		playlist = NewPlaylist()
+		cs.playlists[interaction.GuildID] = playlist
+	}
+
+	embeds := playlist.SongsEmbed()
+
+	if len(embeds) == 0 {
+		interactionResponse(session, interaction, "There is no songs in the main playlist :/")
+		return
+	}
+
+	session.InteractionRespond(interaction.Interaction, &dgo.InteractionResponse{
+		Type: dgo.InteractionResponseChannelMessageWithSource,
+		Data: &dgo.InteractionResponseData{
+			Content: fmt.Sprintf("There is/are %d song(s) in the main playlist:", len(embeds)),
+			Embeds:  embeds,
+		},
+	})
 }
 
 func (cs *ChannelService) Join(session *dgo.Session, interaction *dgo.InteractionCreate) {
@@ -50,92 +72,139 @@ func (cs *ChannelService) Join(session *dgo.Session, interaction *dgo.Interactio
 	interactionResponse(session, interaction, content)
 }
 
-func (cs *ChannelService) AddSong(session *dgo.Session, interaction *dgo.InteractionCreate) {
-	data := interaction.ApplicationCommandData()
-
-	videoID := data.Options[0]
-
-	client := youtube.Client{}
-
-	video, err := client.GetVideo(videoID.StringValue())
-
-	if err != nil {
-		fmt.Println("cannot get video info: ", err)
-		return
-	}
-
-	session.InteractionRespond(interaction.Interaction, &dgo.InteractionResponse{
-		Data: &dgo.InteractionResponseData{
-			Content: "New song added",
-			Embeds: []*dgo.MessageEmbed{
-				{
-					Title:       video.Title,
-					Description: video.Description,
-					Thumbnail:   &dgo.MessageEmbedThumbnail{URL: "url"},
-					Color:       100,
-				},
-			},
-		},
-	})
-
-	formats := video.Formats.WithAudioChannels()
-
-	url, err := client.GetStreamURL(video, &formats[0])
-
-	// stream, _, err := client.GetStream(video, &formats[0])
-
-	if err != nil {
-		fmt.Println("cannot get stream: ", err)
-		return
-	}
-
-	// defer stream.Close()
-
-	dgvoice.PlayAudioFile(voiceConn, url, make(<-chan bool))
-
-	content := fmt.Sprintf("Joining in <#%s>", voiceConn.ChannelID)
-
-	interactionResponse(session, interaction, content)
-}
-
 func (cs *ChannelService) PlaySong(session *dgo.Session, interaction *dgo.InteractionCreate) {
 	voiceConn, ok := session.VoiceConnections[interaction.GuildID]
 
 	if !ok {
+		interactionResponse(session, interaction, "I'm not currently in a voice channel >:P")
 		return
+	}
+
+	playlist, ok := cs.playlists[interaction.GuildID]
+
+	if !ok {
+		playlist = NewPlaylist()
+		cs.playlists[interaction.GuildID] = playlist
 	}
 
 	data := interaction.ApplicationCommandData()
 
-	videoID := data.Options[0]
+	var songID int64
 
-	client := youtube.Client{}
+	if len(data.Options) >= 1 {
+		songID = data.Options[0].IntValue() - 1
+	}
 
-	video, err := client.GetVideo(videoID.StringValue())
+	song := playlist.GetSong(songID)
 
-	if err != nil {
-		fmt.Println("cannot get video info: ", err)
+	if song == nil {
+		interactionResponse(session, interaction, "This song id is not valid :c")
 		return
 	}
 
-	formats := video.Formats.WithAudioChannels()
+	if playlist.isPlaying {
+		playlist.stop <- true
+		playlist.stop <- true
+	}
 
-	url, err := client.GetStreamURL(video, &formats[0])
+	playlist.isPlaying = true
+	playlist.currentSong = song
 
-	// stream, _, err := client.GetStream(video, &formats[0])
+	session.InteractionRespond(interaction.Interaction, &dgo.InteractionResponse{
+		Type: dgo.InteractionResponseChannelMessageWithSource,
+		Data: &dgo.InteractionResponseData{
+			Content: "Playing song",
+			Embeds:  []*dgo.MessageEmbed{song.Embed()},
+		},
+	})
 
-	if err != nil {
-		fmt.Println("cannot get stream: ", err)
+	dgvoice.PlayAudioFile(voiceConn, song.source, playlist.stop)
+
+songLoop:
+	for {
+		song = playlist.NextSong()
+
+		dgvoice.PlayAudioFile(voiceConn, song.source, playlist.stop)
+
+		select {
+		case <-playlist.stop:
+			break songLoop
+		default:
+			continue
+		}
+	}
+}
+
+func (cs *ChannelService) TogglePause(session *dgo.Session, interaction *dgo.InteractionCreate) {
+	voiceConn, ok := session.VoiceConnections[interaction.GuildID]
+
+	if !ok {
+		interactionResponse(session, interaction, "I'm not currently in a voice channel >:P")
 		return
 	}
 
-	// defer stream.Close()
+	playlist, ok := cs.playlists[interaction.GuildID]
 
-	dgvoice.PlayAudioFile(voiceConn, url, make(<-chan bool))
+	if !ok {
+		playlist = NewPlaylist()
+		cs.playlists[interaction.GuildID] = playlist
+	}
 
-	content := fmt.Sprintf("Joining in <#%s>", voiceConn.ChannelID)
+	song := playlist.CurrentSong()
 
-	interactionResponse(session, interaction, content)
+	if song == nil {
+		interactionResponse(session, interaction, "I'm not currently playing music >:P")
+		return
+	}
+
+	isPlaying := playlist.TogglePause()
+
+	if !isPlaying {
+		playlist.stop <- true
+		playlist.stop <- true
+		interactionResponse(session, interaction, "Song paused")
+		return
+	}
+
+	dgvoice.PlayAudioFile(voiceConn, song.source, playlist.stop)
+
+	session.InteractionRespond(interaction.Interaction, &dgo.InteractionResponse{
+		Type: dgo.InteractionResponseChannelMessageWithSource,
+		Data: &dgo.InteractionResponseData{
+			Content: "Playing song",
+			Embeds:  []*dgo.MessageEmbed{song.Embed()},
+		},
+	})
+}
+
+func (cs *ChannelService) AddSong(session *dgo.Session, interaction *dgo.InteractionCreate) {
+	data := interaction.ApplicationCommandData()
+
+	videoID := data.Options[0].StringValue()
+
+	song, err := SongFromID(videoID)
+
+	if err != nil {
+		fmt.Println("cannot create song: ", err)
+		return
+	}
+
+	playlist, ok := cs.playlists[interaction.GuildID]
+
+	if !ok {
+		playlist = NewPlaylist()
+		cs.playlists[interaction.GuildID] = playlist
+	}
+
+	playlist.PushSong(song)
+
+	session.InteractionRespond(interaction.Interaction, &dgo.InteractionResponse{
+		Type: dgo.InteractionResponseChannelMessageWithSource,
+		Data: &dgo.InteractionResponseData{
+			Content: "New song added",
+			Embeds:  []*dgo.MessageEmbed{song.Embed()},
+		},
+	})
 }
 
 func (cs ChannelService) Leave(session *dgo.Session, interaction *dgo.InteractionCreate) {
@@ -144,6 +213,13 @@ func (cs ChannelService) Leave(session *dgo.Session, interaction *dgo.Interactio
 	if !ok {
 		interactionResponse(session, interaction, "Sorry, I'm not currently in a voice channel :P")
 		return
+	}
+
+	playlist, ok := cs.playlists[interaction.GuildID]
+
+	if ok && playlist.isPlaying {
+		playlist.stop <- true
+		playlist.stop <- true
 	}
 
 	err := voiceConn.Disconnect()
@@ -192,7 +268,7 @@ func (cs ChannelService) GetCommandsHandlers() ([]dgo.ApplicationCommand, []inte
 	songYTOption := dgo.ApplicationCommandOption{
 		Type:        dgo.ApplicationCommandOptionString,
 		Name:        "song-url",
-		Description: "The youtube video url",
+		Description: "The youtube video url or the video id",
 		Required:    true,
 	}
 
@@ -203,14 +279,19 @@ func (cs ChannelService) GetCommandsHandlers() ([]dgo.ApplicationCommand, []inte
 		Required:    false,
 	}
 
-	timesOption := dgo.ApplicationCommandOption{
-		Type:        dgo.ApplicationCommandOptionInteger,
-		Name:        "times",
-		Description: "The times to do an action",
-		Required:    false,
-	}
+	// timesOption := dgo.ApplicationCommandOption{
+	// 	Type:        dgo.ApplicationCommandOptionInteger,
+	// 	Name:        "times",
+	// 	Description: "The times to do an action",
+	// 	Required:    false,
+	// }
 
 	// commands
+	list := dgo.ApplicationCommand{
+		Name:        "list",
+		Description: "List the main playlist songs",
+	}
+
 	join := dgo.ApplicationCommand{
 		Name:        "join",
 		Description: "Join in the user voice channel",
@@ -230,18 +311,6 @@ func (cs ChannelService) GetCommandsHandlers() ([]dgo.ApplicationCommand, []inte
 	playSong := dgo.ApplicationCommand{
 		Name:        "play",
 		Description: "Play a song in the main playlist",
-		Options:     []*dgo.ApplicationCommandOption{&songYTOption},
-	}
-
-	addSong := dgo.ApplicationCommand{
-		Name:        "add",
-		Description: "Add a song in the main playlist",
-		Options:     []*dgo.ApplicationCommandOption{&songYTOption},
-	}
-
-	popSong := dgo.ApplicationCommand{
-		Name:        "pop",
-		Description: "Remove the last song added or the songID passed",
 		Options:     []*dgo.ApplicationCommandOption{&songIDOption},
 	}
 
@@ -250,37 +319,49 @@ func (cs ChannelService) GetCommandsHandlers() ([]dgo.ApplicationCommand, []inte
 		Description: "Toggle pause/unpause the current song playing",
 	}
 
-	jumpPrevious := dgo.ApplicationCommand{
-		Name:        "previous",
-		Description: "Play the previous song according to the times specified in the params (by default 1)",
-		Options:     []*dgo.ApplicationCommandOption{&timesOption},
+	addSong := dgo.ApplicationCommand{
+		Name:        "add",
+		Description: "Add a song in the main playlist",
+		Options:     []*dgo.ApplicationCommandOption{&songYTOption},
 	}
 
-	jumpNext := dgo.ApplicationCommand{
-		Name:        "next",
-		Description: "Play the next song according to the times specified in the params (by default 1)",
-		Options:     []*dgo.ApplicationCommandOption{&timesOption},
-	}
+	// popSong := dgo.ApplicationCommand{
+	// 	Name:        "pop",
+	// 	Description: "Remove the last song added or the songID passed",
+	// 	Options:     []*dgo.ApplicationCommandOption{&songIDOption},
+	// }
 
-	bucleSong := dgo.ApplicationCommand{
-		Name:        "buble",
-		Description: "Repeat the current playing song, one or more times (by default 1)",
-		Options:     []*dgo.ApplicationCommandOption{&timesOption},
-	}
+	// jumpPrevious := dgo.ApplicationCommand{
+	// 	Name:        "previous",
+	// 	Description: "Play the previous song according to the times specified in the params (by default 1)",
+	// 	Options:     []*dgo.ApplicationCommandOption{&timesOption},
+	// }
 
-	restartPlaylist := dgo.ApplicationCommand{
-		Name:        "restart",
-		Description: "Restart the main playlist status",
-	}
+	// jumpNext := dgo.ApplicationCommand{
+	// 	Name:        "next",
+	// 	Description: "Play the next song according to the times specified in the params (by default 1)",
+	// 	Options:     []*dgo.ApplicationCommandOption{&timesOption},
+	// }
 
-	shufflePlaylist := dgo.ApplicationCommand{
-		Name:        "shuffle",
-		Description: "Shuffle the main playlist",
-	}
+	// bucleSong := dgo.ApplicationCommand{
+	// 	Name:        "buble",
+	// 	Description: "Repeat the current playing song, one or more times (by default 1)",
+	// 	Options:     []*dgo.ApplicationCommandOption{&timesOption},
+	// }
 
-	commands := []dgo.ApplicationCommand{join, leave, playSong, addSong, popSong, togglePause, jumpPrevious, jumpNext, bucleSong, restartPlaylist, shufflePlaylist}
+	// restartPlaylist := dgo.ApplicationCommand{
+	// 	Name:        "restart",
+	// 	Description: "Restart the main playlist status",
+	// }
 
-	handlers := []interactionHandler{cs.Join, cs.Leave, cs.PlaySong}
+	// shufflePlaylist := dgo.ApplicationCommand{
+	// 	Name:        "shuffle",
+	// 	Description: "Shuffle the main playlist",
+	// }
+
+	commands := []dgo.ApplicationCommand{list, join, leave, playSong, togglePause, addSong}
+
+	handlers := []interactionHandler{cs.List, cs.Join, cs.Leave, cs.PlaySong, cs.TogglePause, cs.AddSong}
 
 	return commands, handlers
 }
@@ -295,9 +376,8 @@ func (cs ChannelService) CommandHandler(session *dgo.Session, interaction *dgo.I
 	commands, handlers := cs.GetCommandsHandlers()
 
 	for i, command := range commands {
-		println(data.Name, command.Name)
-
 		if data.Name == command.Name {
+			println("enter in command: ", command.Name)
 			handlers[i](session, interaction)
 			return
 		}

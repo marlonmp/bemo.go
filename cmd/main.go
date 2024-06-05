@@ -30,7 +30,7 @@ func main() {
 
 	session.Identify.Intents = discordgo.IntentsAll
 
-	service := bemogo.ChannelService{}
+	service := bemogo.NewChannelService()
 
 	session.AddHandler(service.AddCommands)
 
